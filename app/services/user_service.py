@@ -3,7 +3,7 @@ from fastapi import HTTPException, status
 
 from app.models.user import User
 from app.schemas.user import UserCreate
-from app.utils.security import hash_password
+from app.utils.security import hash_password, verify_password
 
 
 def create_user(db: Session, user_data: UserCreate) -> User:
@@ -26,3 +26,20 @@ def create_user(db: Session, user_data: UserCreate) -> User:
     db.refresh(new_user)
 
     return new_user
+
+def authenticate_user(db: Session, email: str, password: str) -> User:
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email ou senha incorretos",
+        )
+
+    if not verify_password(password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email ou senha incorretos",
+        )
+
+    return user
