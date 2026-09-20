@@ -60,3 +60,10 @@ class ExpenseResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SmallExpensesSummary(BaseModel):
+    total_current_month: Decimal
+    average_daily: Decimal
+    projected_monthly: Decimal
+    projected_yearly: Decimal
