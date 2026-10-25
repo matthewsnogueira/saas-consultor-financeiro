@@ -1,5 +1,5 @@
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, Enum, ForeignKey
 from sqlalchemy.orm import relationship
@@ -29,7 +29,7 @@ class Debt(Base):
     due_date = Column(Date, nullable=True)
 
     status = Column(Enum(DebtStatus), nullable=False, default=DebtStatus.ativa)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     user = relationship("User", back_populates="debts")
