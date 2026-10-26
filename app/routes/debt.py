@@ -10,6 +10,7 @@ from app.schemas.debt import (
     DebtPaymentCreate,
     DebtPaymentResponse,
     DebtResponse,
+    DebtSettleRequest,
     ReportedBalanceCreate,
     ReportedBalanceResponse,
 )
@@ -20,6 +21,8 @@ from app.services.debt_service import (
     get_debt_detail,
     get_user_debts,
     list_payments,
+    reopen_debt,
+    settle_debt,
 )
 
 router = APIRouter(prefix="/debts", tags=["Debts"])
@@ -49,6 +52,25 @@ def debt_detail(
     current_user: User = Depends(get_current_user),
 ):
     return get_debt_detail(db, debt_id, current_user)
+
+
+@router.post("/{debt_id}/settle", response_model=DebtResponse)
+def settle(
+    debt_id: int,
+    settle_data: DebtSettleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return settle_debt(db, debt_id, settle_data, current_user)
+
+
+@router.post("/{debt_id}/reopen", response_model=DebtResponse)
+def reopen(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return reopen_debt(db, debt_id, current_user)
 
 
 @router.post("/{debt_id}/payments", response_model=DebtPaymentResponse)

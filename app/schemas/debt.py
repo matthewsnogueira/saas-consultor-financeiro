@@ -51,8 +51,23 @@ class DebtResponse(BaseModel):
     installment_count: Optional[int]
     due_date: Optional[date]
     status: DebtStatus
+    settled_at: Optional[date]
+    creditor_confirmed: bool
     created_at: datetime
     user_id: int
+
+
+class DebtSettleRequest(BaseModel):
+    settled_at: date = Field(default_factory=date.today)
+    # False = o usuário declara que quitou; True = o usuário afirma que o credor confirmou.
+    creditor_confirmed: bool = False
+
+    @field_validator("settled_at")
+    @classmethod
+    def data_nao_pode_ser_futura(cls, value: date) -> date:
+        if value > date.today():
+            raise ValueError("A data da quitação não pode ser no futuro.")
+        return value
 
 
 class DebtPaymentCreate(BaseModel):

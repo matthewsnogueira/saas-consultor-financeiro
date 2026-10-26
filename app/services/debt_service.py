@@ -12,6 +12,7 @@ from app.schemas.debt import (
     DebtCreate,
     DebtPaymentCreate,
     DebtResponse,
+    DebtSettleRequest,
     ReportedBalanceCreate,
     ReportedBalanceResponse,
 )
@@ -20,6 +21,10 @@ NOTICE_ESTIMATE = "Valor estimado: pode ser diferente do cobrado pelo credor."
 NOTICE_PAID_REACHED_ORIGINAL = (
     "O total pago atingiu o valor original, mas isso não confirma a quitação. "
     "Confirme com o credor."
+)
+NOTICE_SETTLED_DECLARED = "Dívida quitada em {data}, conforme declarado por você."
+NOTICE_SETTLED_CONFIRMED = (
+    "Dívida quitada em {data}, com confirmação do credor informada por você."
 )
 
 
@@ -65,6 +70,40 @@ def get_owned_debt(db: Session, debt_id: int, current_user: User) -> Debt:
     )
     if debt is None:
         raise HTTPException(status_code=404, detail="Dívida não encontrada.")
+    return debt
+
+
+def settle_debt(
+    db: Session, debt_id: int, settle_data: DebtSettleRequest, current_user: User
+) -> Debt:
+    debt = get_owned_debt(db, debt_id, current_user)
+
+    if debt.status == DebtStatus.quitada:
+        raise HTTPException(status_code=409, detail="A dívida já está quitada.")
+
+    debt.status = DebtStatus.quitada
+    debt.settled_at = settle_data.settled_at
+    debt.creditor_confirmed = settle_data.creditor_confirmed
+
+    db.commit()
+    db.refresh(debt)
+
+    return debt
+
+
+def reopen_debt(db: Session, debt_id: int, current_user: User) -> Debt:
+    debt = get_owned_debt(db, debt_id, current_user)
+
+    if debt.status == DebtStatus.ativa:
+        raise HTTPException(status_code=409, detail="A dívida já está ativa.")
+
+    debt.status = DebtStatus.ativa
+    debt.settled_at = None
+    debt.creditor_confirmed = False
+
+    db.commit()
+    db.refresh(debt)
+
     return debt
 
 
@@ -126,13 +165,22 @@ def get_debt_detail(db: Session, debt_id: int, current_user: User) -> dict:
         .scalar()
     )
 
-    # Estimativa sem juros, nunca abaixo de zero.
-    estimated_balance = max(debt.original_amount - total_paid, Decimal("0"))
-
-    if total_paid >= debt.original_amount:
-        notice = NOTICE_PAID_REACHED_ORIGINAL
+    if debt.status == DebtStatus.quitada:
+        # Dívida quitada pelo usuário: nada mais a estimar, mesmo que o total pago
+        # seja menor que o original (por exemplo, um desconto negociado).
+        estimated_balance = Decimal("0")
+        data = debt.settled_at.strftime("%d/%m/%Y") if debt.settled_at else "data não informada"
+        template = (
+            NOTICE_SETTLED_CONFIRMED if debt.creditor_confirmed else NOTICE_SETTLED_DECLARED
+        )
+        notice = template.format(data=data)
     else:
-        notice = NOTICE_ESTIMATE
+        # Estimativa sem juros, nunca abaixo de zero.
+        estimated_balance = max(debt.original_amount - total_paid, Decimal("0"))
+        if total_paid >= debt.original_amount:
+            notice = NOTICE_PAID_REACHED_ORIGINAL
+        else:
+            notice = NOTICE_ESTIMATE
 
     # Saldo informado pelo usuário: o mais recente pela data de referência.
     # Ele nunca é recalculado a partir dos pagamentos.

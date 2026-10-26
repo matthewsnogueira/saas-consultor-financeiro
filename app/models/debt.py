@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, Enum, ForeignKey
+from sqlalchemy import Boolean, Column, Integer, String, Numeric, Date, DateTime, Enum, ForeignKey, false
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -29,6 +29,12 @@ class Debt(Base):
     due_date = Column(Date, nullable=True)
 
     status = Column(Enum(DebtStatus), nullable=False, default=DebtStatus.ativa)
+
+    # Quitação: preenchida só quando o usuário confirma, nunca pelo sistema.
+    settled_at = Column(Date, nullable=True)
+    # False = quitação declarada pelo usuário; True = o usuário afirma que o credor confirmou.
+    creditor_confirmed = Column(Boolean, nullable=False, default=False, server_default=false())
+
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
