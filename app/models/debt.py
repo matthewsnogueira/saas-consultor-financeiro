@@ -33,3 +33,5 @@ class Debt(Base):
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     user = relationship("User", back_populates="debts")
+    payments = relationship("DebtPayment", back_populates="debt")
+    reported_balances = relationship("DebtReportedBalance", back_populates="debt")

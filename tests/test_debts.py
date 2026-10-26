@@ -2,30 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-SENHA = "senha-de-teste-123"
 DIVIDA_BASE = {"creditor": "Banco Exemplo", "original_amount": "1500.50"}
-
-
-def criar_usuario_e_logar(client, name, email):
-    """Cadastra um usuário fictício, faz login e devolve o cabeçalho de autenticação."""
-    resposta = client.post("/users/", json={"name": name, "email": email, "password": SENHA})
-    assert resposta.status_code in (200, 201), resposta.text
-
-    resposta = client.post("/users/login", json={"email": email, "password": SENHA})
-    assert resposta.status_code == 200, resposta.text
-
-    token = resposta.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture
-def ana(client):
-    return criar_usuario_e_logar(client, "Ana Teste", "ana@exemplo.com")
-
-
-@pytest.fixture
-def bruno(client):
-    return criar_usuario_e_logar(client, "Bruno Teste", "bruno@exemplo.com")
 
 
 def test_cria_divida_completa(client, ana):
