@@ -5,7 +5,7 @@ from alembic import context
 from app.core.database import Base, DATABASE_URL, engine
 
 # Importa os modelos para o Base.metadata conhecer todas as tabelas.
-from app.models import user, income, expense, debt, debt_payment, debt_reported_balance  # noqa: F401
+from app.models import user, income, expense, debt, debt_payment, debt_reported_balance, debt_installment  # noqa: F401
 
 config = context.config
 

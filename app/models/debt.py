@@ -41,3 +41,6 @@ class Debt(Base):
     user = relationship("User", back_populates="debts")
     payments = relationship("DebtPayment", back_populates="debt")
     reported_balances = relationship("DebtReportedBalance", back_populates="debt")
+    installments = relationship(
+        "DebtInstallment", back_populates="debt", order_by="DebtInstallment.number"
+    )

@@ -11,7 +11,7 @@ from app.core.database import Base, engine
 from app.main import app
 
 # Importa os modelos para o Base.metadata conhecer todas as tabelas.
-from app.models import user, income, expense, debt, debt_payment, debt_reported_balance  # noqa: F401
+from app.models import user, income, expense, debt, debt_payment, debt_reported_balance, debt_installment  # noqa: F401
 
 # Proteção: nunca rodar testes em um banco que não seja de teste.
 assert engine.url.database.endswith("_test"), (
