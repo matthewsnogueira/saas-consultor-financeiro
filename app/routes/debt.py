@@ -11,6 +11,9 @@ from app.schemas.debt import (
     DebtPaymentResponse,
     DebtResponse,
     DebtSettleRequest,
+    InstallmentPreviewRequest,
+    InstallmentPreviewResponse,
+    InstallmentResponse,
     ReportedBalanceCreate,
     ReportedBalanceResponse,
 )
@@ -20,7 +23,9 @@ from app.services.debt_service import (
     create_reported_balance,
     get_debt_detail,
     get_user_debts,
+    list_installments,
     list_payments,
+    preview_installments,
     reopen_debt,
     settle_debt,
 )
@@ -43,6 +48,15 @@ def list_debts(
     current_user: User = Depends(get_current_user),
 ):
     return get_user_debts(db, current_user)
+
+
+# Rota com nome fixo: precisa vir antes das rotas com {debt_id}.
+@router.post("/installments-preview", response_model=InstallmentPreviewResponse)
+def installments_preview(
+    preview_data: InstallmentPreviewRequest,
+    current_user: User = Depends(get_current_user),
+):
+    return preview_installments(preview_data)
 
 
 @router.get("/{debt_id}", response_model=DebtDetailResponse)
@@ -71,6 +85,15 @@ def reopen(
     current_user: User = Depends(get_current_user),
 ):
     return reopen_debt(db, debt_id, current_user)
+
+
+@router.get("/{debt_id}/installments", response_model=list[InstallmentResponse])
+def debt_installments(
+    debt_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return list_installments(db, debt_id, current_user)
 
 
 @router.post("/{debt_id}/payments", response_model=DebtPaymentResponse)

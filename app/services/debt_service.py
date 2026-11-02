@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -5,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.debt import Debt, DebtStatus
+from app.models.debt_installment import DebtInstallment
 from app.models.debt_payment import DebtPayment
 from app.models.debt_reported_balance import DebtReportedBalance
 from app.models.user import User
@@ -13,9 +15,12 @@ from app.schemas.debt import (
     DebtPaymentCreate,
     DebtResponse,
     DebtSettleRequest,
+    InstallmentPreviewRequest,
+    InstallmentStatus,
     ReportedBalanceCreate,
     ReportedBalanceResponse,
 )
+from app.utils.installments import build_schedule, estimate_installment_amount
 
 NOTICE_ESTIMATE = "Valor estimado: pode ser diferente do cobrado pelo credor."
 NOTICE_PAID_REACHED_ORIGINAL = (
@@ -27,14 +32,111 @@ NOTICE_SETTLED_CONFIRMED = (
     "Dívida quitada em {data}, com confirmação do credor informada por você."
 )
 
+NOTICE_SCHEDULE_LIMITATION = (
+    "As parcelas serão criadas mensais e com valores iguais. "
+    "Depois de salvar, não será possível editar valores nem vencimentos individualmente."
+)
+NOTICE_AMOUNT_ESTIMATED = (
+    "O valor da parcela é uma estimativa (valor total dividido pela quantidade, sem juros). "
+    "Se o contrato tiver um valor de parcela diferente, informe-o."
+)
+NOTICE_TOTAL_DIFFERS = (
+    "A soma das parcelas ({soma}) é diferente do valor total informado ({total}). "
+    "Isso é esperado quando há juros ou arredondamento."
+)
+
+
+def _format_brl(value: Decimal) -> str:
+    """Formata um valor em reais no padrão brasileiro: R$ 1.234,56."""
+    texto = f"{value:,.2f}"  # 1,234.56
+    return "R$ " + texto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _resolve_installment_amount(
+    original_amount: Decimal, count: int, informed_amount: Decimal | None
+) -> tuple[Decimal, bool]:
+    """Devolve (valor da parcela, se é estimado). Usado na prévia e no cadastro real."""
+    if informed_amount is not None:
+        return informed_amount, False
+
+    estimated = estimate_installment_amount(original_amount, count)
+    if estimated <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="O valor total é pequeno demais para dividir nessa quantidade de parcelas.",
+        )
+    return estimated, True
+
+
+def compute_installment_state(
+    amount: Decimal,
+    paid_amount: Decimal,
+    due_date: date,
+    today: date,
+    debt_is_settled: bool,
+) -> tuple[InstallmentStatus, int]:
+    """Estado da parcela e dias de atraso, sempre calculados na hora (nunca guardados)."""
+    if paid_amount >= amount:
+        return InstallmentStatus.paga, 0
+    if debt_is_settled:
+        return InstallmentStatus.encerrada, 0
+    if due_date < today:
+        return InstallmentStatus.vencida, (today - due_date).days
+    if paid_amount > 0:
+        return InstallmentStatus.parcial, 0
+    return InstallmentStatus.pendente, 0
+
+
+def preview_installments(preview_data: InstallmentPreviewRequest) -> dict:
+    """Mostra o cronograma que seria criado, sem gravar nada."""
+    amount, is_estimated = _resolve_installment_amount(
+        preview_data.original_amount,
+        preview_data.installment_count,
+        preview_data.installment_amount,
+    )
+    schedule = build_schedule(
+        preview_data.first_due_date, preview_data.installment_count, amount
+    )
+    total_of_installments = amount * preview_data.installment_count
+
+    notices = [NOTICE_SCHEDULE_LIMITATION]
+    if is_estimated:
+        notices.append(NOTICE_AMOUNT_ESTIMATED)
+    if total_of_installments != preview_data.original_amount:
+        notices.append(
+            NOTICE_TOTAL_DIFFERS.format(
+                soma=_format_brl(total_of_installments),
+                total=_format_brl(preview_data.original_amount),
+            )
+        )
+
+    return {
+        "installments": schedule,
+        "installment_amount": amount,
+        "amount_is_estimated": is_estimated,
+        "total_of_installments": total_of_installments,
+        "notices": notices,
+    }
+
 
 def create_debt(db: Session, debt_data: DebtCreate, current_user: User) -> Debt:
+    installment_amount = debt_data.installment_amount
+    schedule = []
+
+    if debt_data.installment_count is not None:
+        installment_amount, _ = _resolve_installment_amount(
+            debt_data.original_amount, debt_data.installment_count, installment_amount
+        )
+        schedule = build_schedule(
+            debt_data.due_date, debt_data.installment_count, installment_amount
+        )
+
     new_debt = Debt(
         creditor=debt_data.creditor,
         description=debt_data.description,
         original_amount=debt_data.original_amount,
         monthly_interest_rate=debt_data.monthly_interest_rate,
-        installment_amount=debt_data.installment_amount,
+        installment_amount=installment_amount,
         installment_count=debt_data.installment_count,
         due_date=debt_data.due_date,
         status=DebtStatus.ativa,
@@ -42,6 +144,20 @@ def create_debt(db: Session, debt_data: DebtCreate, current_user: User) -> Debt:
     )
 
     db.add(new_debt)
+    # flush envia a dívida ao banco só para ela ganhar um id; nada é confirmado ainda.
+    db.flush()
+
+    for item in schedule:
+        db.add(
+            DebtInstallment(
+                debt_id=new_debt.id,
+                number=item["number"],
+                due_date=item["due_date"],
+                amount=item["amount"],
+            )
+        )
+
+    # Dívida e parcelas são confirmadas juntas: se algo falhar, nada fica salvo.
     db.commit()
     db.refresh(new_debt)
 
@@ -112,8 +228,22 @@ def create_payment(
 ) -> DebtPayment:
     debt = get_owned_debt(db, debt_id, current_user)
 
+    if payment_data.installment_id is not None:
+        # A parcela é procurada dentro desta dívida: id inexistente ou de outra dívida dá 404.
+        installment = (
+            db.query(DebtInstallment)
+            .filter(
+                DebtInstallment.id == payment_data.installment_id,
+                DebtInstallment.debt_id == debt.id,
+            )
+            .first()
+        )
+        if installment is None:
+            raise HTTPException(status_code=404, detail="Parcela não encontrada nesta dívida.")
+
     new_payment = DebtPayment(
         debt_id=debt.id,
+        installment_id=payment_data.installment_id,
         amount=payment_data.amount,
         payment_date=payment_data.payment_date,
         notes=payment_data.notes,
@@ -135,6 +265,50 @@ def list_payments(db: Session, debt_id: int, current_user: User):
         .order_by(DebtPayment.payment_date.desc(), DebtPayment.id.desc())
         .all()
     )
+
+
+def list_installments(db: Session, debt_id: int, current_user: User) -> list[dict]:
+    debt = get_owned_debt(db, debt_id, current_user)
+
+    installments = (
+        db.query(DebtInstallment)
+        .filter(DebtInstallment.debt_id == debt.id)
+        .order_by(DebtInstallment.number)
+        .all()
+    )
+
+    # Uma só consulta soma os pagamentos de todas as parcelas, agrupados por parcela.
+    paid_rows = (
+        db.query(DebtPayment.installment_id, func.sum(DebtPayment.amount))
+        .filter(DebtPayment.debt_id == debt.id, DebtPayment.installment_id.isnot(None))
+        .group_by(DebtPayment.installment_id)
+        .all()
+    )
+    paid_by_installment = {installment_id: Decimal(total) for installment_id, total in paid_rows}
+
+    today = date.today()
+    debt_is_settled = debt.status == DebtStatus.quitada
+
+    result = []
+    for installment in installments:
+        paid_amount = paid_by_installment.get(installment.id, Decimal("0"))
+        status, days_overdue = compute_installment_state(
+            installment.amount, paid_amount, installment.due_date, today, debt_is_settled
+        )
+        result.append(
+            {
+                "id": installment.id,
+                "debt_id": installment.debt_id,
+                "number": installment.number,
+                "due_date": installment.due_date,
+                "amount": installment.amount,
+                "paid_amount": paid_amount,
+                "status": status,
+                "days_overdue": days_overdue,
+            }
+        )
+
+    return result
 
 
 def create_reported_balance(

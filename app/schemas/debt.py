@@ -1,3 +1,4 @@
+import enum
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
@@ -5,6 +6,18 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.debt import DebtStatus
+
+# Limite de segurança: evita criar milhares de parcelas por engano.
+# Um financiamento imobiliário longo tem em torno de 420 parcelas mensais.
+MAX_INSTALLMENTS = 480
+
+
+class InstallmentStatus(str, enum.Enum):
+    paga = "paga"
+    parcial = "parcial"
+    vencida = "vencida"
+    pendente = "pendente"
+    encerrada = "encerrada"
 
 
 class DebtCreate(BaseModel):
@@ -17,7 +30,8 @@ class DebtCreate(BaseModel):
     installment_amount: Optional[Decimal] = Field(
         default=None, gt=0, max_digits=12, decimal_places=2
     )
-    installment_count: Optional[int] = Field(default=None, ge=1)
+    installment_count: Optional[int] = Field(default=None, ge=1, le=MAX_INSTALLMENTS)
+    # Em dívida parcelada, é o vencimento da primeira parcela.
     due_date: Optional[date] = None
 
     @field_validator("creditor")
@@ -29,12 +43,12 @@ class DebtCreate(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def parcela_e_quantidade_juntas(self):
-        tem_valor = self.installment_amount is not None
-        tem_quantidade = self.installment_count is not None
-        if tem_valor != tem_quantidade:
+    def regras_de_parcelamento(self):
+        if self.installment_amount is not None and self.installment_count is None:
+            raise ValueError("Informe a quantidade de parcelas junto com o valor da parcela.")
+        if self.installment_count is not None and self.due_date is None:
             raise ValueError(
-                "Informe o valor da parcela e a quantidade de parcelas juntos, ou nenhum dos dois."
+                "Para parcelar, informe o vencimento da primeira parcela (due_date)."
             )
         return self
 
@@ -70,10 +84,46 @@ class DebtSettleRequest(BaseModel):
         return value
 
 
+class InstallmentPreviewRequest(BaseModel):
+    original_amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    installment_count: int = Field(ge=1, le=MAX_INSTALLMENTS)
+    first_due_date: date
+    installment_amount: Optional[Decimal] = Field(
+        default=None, gt=0, max_digits=12, decimal_places=2
+    )
+
+
+class InstallmentPreviewItem(BaseModel):
+    number: int
+    due_date: date
+    amount: Decimal
+
+
+class InstallmentPreviewResponse(BaseModel):
+    installments: list[InstallmentPreviewItem]
+    installment_amount: Decimal
+    amount_is_estimated: bool
+    total_of_installments: Decimal
+    notices: list[str]
+
+
+class InstallmentResponse(BaseModel):
+    id: int
+    debt_id: int
+    number: int
+    due_date: date
+    amount: Decimal
+    paid_amount: Decimal
+    status: InstallmentStatus
+    days_overdue: int
+
+
 class DebtPaymentCreate(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
     payment_date: date = Field(default_factory=date.today)
     notes: Optional[str] = Field(default=None, max_length=255)
+    # Opcional: a qual parcela este pagamento se refere.
+    installment_id: Optional[int] = Field(default=None, ge=1)
 
     @field_validator("payment_date")
     @classmethod
@@ -88,6 +138,7 @@ class DebtPaymentResponse(BaseModel):
 
     id: int
     debt_id: int
+    installment_id: Optional[int]
     amount: Decimal
     payment_date: date
     notes: Optional[str]
