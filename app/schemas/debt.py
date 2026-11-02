@@ -20,6 +20,13 @@ class InstallmentStatus(str, enum.Enum):
     encerrada = "encerrada"
 
 
+class DelayState(str, enum.Enum):
+    quitada = "quitada"
+    sem_vencimento_definido = "sem_vencimento_definido"
+    em_atraso = "em_atraso"
+    em_dia = "em_dia"
+
+
 class DebtCreate(BaseModel):
     creditor: str = Field(max_length=150)
     description: Optional[str] = Field(default=None, max_length=255)
@@ -168,8 +175,21 @@ class ReportedBalanceResponse(BaseModel):
     created_at: datetime
 
 
+class DebtDelay(BaseModel):
+    state: DelayState
+    days_overdue: int
+    # Só preenchido quando a dívida tem parcelas.
+    overdue_installments: Optional[int] = None
+    overdue_amount: Optional[Decimal] = None
+    # True quando o valor em atraso é uma estimativa (dívida sem parcelas).
+    overdue_amount_is_estimated: bool = False
+    next_due_date: Optional[date] = None
+    notice: str
+
+
 class DebtDetailResponse(DebtResponse):
     total_paid: Decimal
     estimated_balance: Decimal
     estimate_notice: str
     reported_balance: Optional[ReportedBalanceResponse] = None
+    delay: DebtDelay

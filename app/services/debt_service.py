@@ -15,6 +15,7 @@ from app.schemas.debt import (
     DebtPaymentCreate,
     DebtResponse,
     DebtSettleRequest,
+    DelayState,
     InstallmentPreviewRequest,
     InstallmentStatus,
     ReportedBalanceCreate,
@@ -44,6 +45,26 @@ NOTICE_TOTAL_DIFFERS = (
     "A soma das parcelas ({soma}) é diferente do valor total informado ({total}). "
     "Isso é esperado quando há juros ou arredondamento."
 )
+
+NOTICE_DELAY_SETTLED = "Dívida quitada, sem atraso."
+NOTICE_DELAY_NO_DUE_DATE = (
+    "Esta dívida não tem vencimento definido, então não é possível calcular atraso. "
+    "Informe um vencimento para acompanhar."
+)
+NOTICE_DELAY_INSTALLMENTS = (
+    "{qtd} parcela(s) vencida(s), faltando {valor}. "
+    "Pagamentos registrados sem indicar a parcela não entram nesta conta."
+)
+NOTICE_DELAY_NONE_OVERDUE = "Nenhuma parcela vencida."
+NOTICE_DELAY_ALL_PAID = (
+    "Todas as parcelas estão pagas, mas isso não confirma a quitação. "
+    "Confirme com o credor."
+)
+NOTICE_DELAY_INFORMAL_OVERDUE = (
+    "O vencimento em {data} já passou. O valor em atraso é uma estimativa "
+    "(valor original menos pagamentos registrados, sem juros)."
+)
+NOTICE_DELAY_INFORMAL_UPCOMING = "Vence em {data}."
 
 
 def _format_brl(value: Decimal) -> str:
@@ -85,6 +106,110 @@ def compute_installment_state(
     if paid_amount > 0:
         return InstallmentStatus.parcial, 0
     return InstallmentStatus.pendente, 0
+
+
+def compute_debt_delay(
+    debt_is_settled: bool,
+    due_date: date | None,
+    original_amount: Decimal,
+    total_paid: Decimal,
+    installments: list[dict],
+    today: date,
+) -> dict:
+    """Situação de atraso da dívida, sempre calculada na hora (nunca guardada).
+
+    Dívida com parcelas: o atraso vem das parcelas vencidas.
+    Dívida sem parcelas: usa o vencimento único, e o valor em atraso é uma estimativa.
+    Dívida sem parcelas e sem vencimento: responde "sem vencimento definido".
+    """
+    if debt_is_settled:
+        return {
+            "state": DelayState.quitada,
+            "days_overdue": 0,
+            "overdue_installments": None,
+            "overdue_amount": None,
+            "overdue_amount_is_estimated": False,
+            "next_due_date": None,
+            "notice": NOTICE_DELAY_SETTLED,
+        }
+
+    if installments:
+        overdue = [i for i in installments if i["status"] == InstallmentStatus.vencida]
+        upcoming = [
+            i["due_date"]
+            for i in installments
+            if i["status"] in (InstallmentStatus.pendente, InstallmentStatus.parcial)
+        ]
+        next_due_date = min(upcoming) if upcoming else None
+
+        if overdue:
+            overdue_amount = sum(
+                (i["amount"] - i["paid_amount"] for i in overdue), Decimal("0")
+            )
+            return {
+                "state": DelayState.em_atraso,
+                "days_overdue": max(i["days_overdue"] for i in overdue),
+                "overdue_installments": len(overdue),
+                "overdue_amount": overdue_amount,
+                "overdue_amount_is_estimated": False,
+                "next_due_date": next_due_date,
+                "notice": NOTICE_DELAY_INSTALLMENTS.format(
+                    qtd=len(overdue), valor=_format_brl(overdue_amount)
+                ),
+            }
+
+        return {
+            "state": DelayState.em_dia,
+            "days_overdue": 0,
+            "overdue_installments": 0,
+            "overdue_amount": Decimal("0"),
+            "overdue_amount_is_estimated": False,
+            "next_due_date": next_due_date,
+            "notice": NOTICE_DELAY_NONE_OVERDUE if upcoming else NOTICE_DELAY_ALL_PAID,
+        }
+
+    if due_date is None:
+        return {
+            "state": DelayState.sem_vencimento_definido,
+            "days_overdue": 0,
+            "overdue_installments": None,
+            "overdue_amount": None,
+            "overdue_amount_is_estimated": False,
+            "next_due_date": None,
+            "notice": NOTICE_DELAY_NO_DUE_DATE,
+        }
+
+    if total_paid >= original_amount:
+        return {
+            "state": DelayState.em_dia,
+            "days_overdue": 0,
+            "overdue_installments": None,
+            "overdue_amount": None,
+            "overdue_amount_is_estimated": False,
+            "next_due_date": None,
+            "notice": NOTICE_PAID_REACHED_ORIGINAL,
+        }
+
+    if due_date < today:
+        return {
+            "state": DelayState.em_atraso,
+            "days_overdue": (today - due_date).days,
+            "overdue_installments": None,
+            "overdue_amount": original_amount - total_paid,
+            "overdue_amount_is_estimated": True,
+            "next_due_date": None,
+            "notice": NOTICE_DELAY_INFORMAL_OVERDUE.format(data=due_date.strftime("%d/%m/%Y")),
+        }
+
+    return {
+        "state": DelayState.em_dia,
+        "days_overdue": 0,
+        "overdue_installments": None,
+        "overdue_amount": None,
+        "overdue_amount_is_estimated": False,
+        "next_due_date": due_date,
+        "notice": NOTICE_DELAY_INFORMAL_UPCOMING.format(data=due_date.strftime("%d/%m/%Y")),
+    }
 
 
 def preview_installments(preview_data: InstallmentPreviewRequest) -> dict:
@@ -267,9 +392,8 @@ def list_payments(db: Session, debt_id: int, current_user: User):
     )
 
 
-def list_installments(db: Session, debt_id: int, current_user: User) -> list[dict]:
-    debt = get_owned_debt(db, debt_id, current_user)
-
+def _installment_rows(db: Session, debt: Debt) -> list[dict]:
+    """Parcelas da dívida com valor pago, estado e dias de atraso, calculados na hora."""
     installments = (
         db.query(DebtInstallment)
         .filter(DebtInstallment.debt_id == debt.id)
@@ -309,6 +433,11 @@ def list_installments(db: Session, debt_id: int, current_user: User) -> list[dic
         )
 
     return result
+
+
+def list_installments(db: Session, debt_id: int, current_user: User) -> list[dict]:
+    debt = get_owned_debt(db, debt_id, current_user)
+    return _installment_rows(db, debt)
 
 
 def create_reported_balance(
@@ -369,6 +498,15 @@ def get_debt_detail(db: Session, debt_id: int, current_user: User) -> dict:
         .first()
     )
 
+    delay = compute_debt_delay(
+        debt_is_settled=debt.status == DebtStatus.quitada,
+        due_date=debt.due_date,
+        original_amount=debt.original_amount,
+        total_paid=total_paid,
+        installments=_installment_rows(db, debt),
+        today=date.today(),
+    )
+
     detail = DebtResponse.model_validate(debt).model_dump()
     detail["total_paid"] = total_paid
     detail["estimated_balance"] = estimated_balance
@@ -376,4 +514,5 @@ def get_debt_detail(db: Session, debt_id: int, current_user: User) -> dict:
     detail["reported_balance"] = (
         ReportedBalanceResponse.model_validate(latest_reported) if latest_reported else None
     )
+    detail["delay"] = delay
     return detail
